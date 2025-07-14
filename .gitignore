@@ -1,5 +1,11 @@
-
+./llama-2-7b.Q4_K_M.gguf
+llama-2-7b.Q4_K_M.gguf
+./llama-2-7b.Q2_K.gguf
+llama-2-7b.Q2_K.gguf
+tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf
+./tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf
 .env
+activate_venv.txt
 
 /.venv
 *__pycache__/
