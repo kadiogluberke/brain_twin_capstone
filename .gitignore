@@ -6,6 +6,11 @@ tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf
 ./tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf
 .env
 activate_venv.txt
+dummy.txt
+qwen2.5-coder-32b-instruct-q4_k_m.gguf
+./qwen2.5-coder-32b-instruct-q4_k_m.gguf
+qwen2.5-coder-7b-instruct-q4_k_m.gguf
+./qwen2.5-coder-7b-instruct-q4_k_m.gguf
 
 /.venv
 *__pycache__/
