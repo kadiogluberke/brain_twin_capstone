@@ -1,8 +1,10 @@
 import os
 import uuid 
 from typing import List, Dict, Any, Iterator
+from types import SimpleNamespace
 
 from smolagents import CodeAgent, Model, Tool
+from smolagents.models import ChatMessageStreamDelta
 from sentence_transformers import SentenceTransformer
 import chromadb
 from llama_cpp import Llama
@@ -29,63 +31,39 @@ embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 # --- Custom Response for LLM ---
 class Resp:
-    """
-    A custom response object to wrap LLM output,
-    compatible with smolagents' expectations and
-    including token usage information.
-    """
     def __init__(self, content_text: str, token_usage_info: Dict[str, Any] = None):
-        """
-        Initializes the Resp object.
 
-        Args:
-            content_text (str): The text content (a chunk for streaming, full text for non-streaming).
-            token_usage_info (Dict[str, Any], optional): Dictionary containing token usage details.
-                                                         Defaults to an empty dictionary.
-                                                         Expected keys: 'prompt_tokens', 'output_tokens', 'total_tokens'.
-        """
         self._content = content_text
-        self._token_usage = token_usage_info if token_usage_info is not None else {}
+        self._token_usage = {
+            'input_tokens': token_usage_info.get('input_tokens', 0) if token_usage_info else 0,
+            'output_tokens': token_usage_info.get('output_tokens', 0) if token_usage_info else 0,
+            'total_tokens': token_usage_info.get('total_tokens', 0) if token_usage_info else 0,
+        }
 
     @property
     def content(self) -> str:
-        """Returns the text content of the response."""
         return self._content
 
     @property
-    def token_usage(self) -> Dict[str, Any]:
+    def token_usage(self) -> SimpleNamespace:
         """
-        Returns a dictionary containing token usage information.
-        Expected keys: 'prompt_tokens', 'output_tokens', 'total_tokens'.
+        Expected keys: 'input_tokens', 'output_tokens', 'total_tokens'.
         """
-        return self._token_usage
+        return SimpleNamespace(**self._token_usage)
 
 # --- Custom Llama.cpp Model Wrapper ---
 class LlamaCppModel(Model):
-    """
-    Custom Model wrapper for Llama.cpp (llama-cpp-python library),
-    designed to be compatible with smolagents.
-    Supports both streaming (`generate_stream`) and non-streaming (`generate`)
-    and provides token usage information.
-    """
-    def __init__(self, path: str, n_gpu_layers: int = 1, n_ctx: int = 4096):
-        """
-        Initializes the Llama.cpp model.
+    def __init__(self, path: str, n_gpu_layers: int = -1, n_ctx: int = 4096):
 
-        Args:
-            path (str): Path to the GGUF model file (e.g., "./tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf").
-            n_gpu_layers (int): Number of layers to offload to GPU (-1 for all, 0 for CPU only).
-                                Set to -1 for maximum GPU utilization if a GPU is available.
-            n_ctx (int): Context window size for the LLM. This defines how much
-                         previous conversation/context the model can "remember".
-        """
         print(f"Loading Llama.cpp model from: {path} with n_ctx={n_ctx}, n_gpu_layers={n_gpu_layers}")
+        
         try:
             self.llm = Llama(
                 model_path=path,
                 n_ctx=n_ctx,
                 n_gpu_layers=n_gpu_layers,
-                verbose=False 
+                verbose=False,
+                chat_format="chatml"
             )
             print("Llama.cpp model loaded successfully.")
         except Exception as e:
@@ -93,45 +71,35 @@ class LlamaCppModel(Model):
                      "and llama-cpp-python is installed with correct GPU support if n_gpu_layers > 0.")
             self.llm = None
 
-    def _format_messages_to_prompt(self, messages: List[Dict]) -> str:
-        """Helper to format messages into a simple prompt string for Llama.cpp."""
-        prompt = ""
-        for m in messages:
-            if m['role'] == 'user':
-                prompt += f"USER: {m['content']}\n"
-            elif m['role'] == 'assistant':
-                prompt += f"ASSISTANT: {m['content']}\n"
-            elif m['role'] == 'system':
-                prompt += f"SYSTEM: {m['content']}\n"
-        prompt += "ASSISTANT:"
-        return prompt
+    # def _format_messages_to_prompt(self, messages: List[Dict]) -> str:
+    #     """Helper to format messages into a simple prompt string for Llama.cpp."""
+    #     prompt = ""
+    #     for m in messages:
+    #         if m['role'] == 'user':
+    #             prompt += f"USER: {m['content']}\n"
+    #         elif m['role'] == 'assistant':
+    #             prompt += f"ASSISTANT: {m['content']}\n"
+    #         elif m['role'] == 'system':
+    #             prompt += f"SYSTEM: {m['content']}\n"
+    #     prompt += "ASSISTANT:"
+    #     return prompt
 
     def generate(self, messages: List[Dict], stop_sequences: List[str] = None) -> Resp:
-        """
-        Generates a non-streaming response from the Llama model.
-        This method is called by smolagents for non-streaming operations.
 
-        Args:
-            messages (List[Dict]): A list of message dictionaries.
-            stop_sequences (List[str]): Optional list of stop sequences.
-
-        Returns:
-            Resp: A Resp object containing the full content and total token usage.
-        """
         if self.llm is None:
-            return Resp(content_text="Error: LLM model not loaded.", token_usage_info={'output_tokens': 0})
+            return Resp(content_text="Error: LLM model not loaded.", token_usage_info={'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})
 
-        prompt = self._format_messages_to_prompt(messages)
+        # prompt = self._format_messages_to_prompt(messages)
 
         try:
-            out = self.llm(
-                prompt,
+            out = self.llm.create_chat_completion(
+                messages=messages,
                 max_tokens=512, 
                 stop=stop_sequences
             )
-            content = out['choices'][0]['text']
+            content = out['choices'][0]['message']['content']
             token_usage = {
-                'prompt_tokens': out['usage']['prompt_tokens'],
+                'input_tokens': out['usage']['prompt_tokens'],
                 'output_tokens': out['usage']['completion_tokens'], 
                 'total_tokens': out['usage']['total_tokens']
             }
@@ -139,46 +107,59 @@ class LlamaCppModel(Model):
 
         except Exception as e:
             print(f"Error during non-streaming LLM generation: {e}")
-            return Resp(content_text=f"An error occurred during generation: {e}", token_usage_info={'output_tokens': 0}) 
+            return Resp(content_text=f"An error occurred during generation: {e}", token_usage_info={'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}) 
 
-    def generate_stream(self, messages: List[Dict], stop_sequences: List[str] = None) -> Iterator[Resp]:
-        """
-        Generates a streaming response from the Llama model.
-        This method is called by smolagents when stream_outputs=True.
-
-        Args:
-            messages (List[Dict]): A list of message dictionaries.
-            stop_sequences (List[str]): Optional list of stop sequences.
-
-        Yields:
-            Resp: A Resp object containing the content chunk and token usage for that chunk.
-                  Each yielded object represents a piece of the streamed output.
-        """
+    def generate_stream(self, messages: List[Dict], stop_sequences: List[str] = None) -> Iterator[ChatMessageStreamDelta]:
+    
         if self.llm is None:
-            yield Resp(content_text="Error: LLM model not loaded.", token_usage_info={'output_tokens': 0}) 
+            # yield Resp(content_text="Error: LLM model not loaded.", token_usage_info={'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}) 
+            yield ChatMessageStreamDelta(
+                content="Error: LLM model not loaded.",
+                # role="assistant",
+                token_usage=SimpleNamespace(input_tokens=0, output_tokens=0, total_tokens=0)
+            )
             return
 
-        prompt = self._format_messages_to_prompt(messages)
+        # prompt = self._format_messages_to_prompt(messages)
 
         try:
-            stream_iterator = self.llm(
-                prompt,
-                max_tokens=512,
-                stream=True,
-                stop=stop_sequences
-            )
+            stream_iterator = self.llm.create_chat_completion(
+            messages=messages,
+            max_tokens=512,
+            stream=True,
+            stop=stop_sequences
+        )
+
+            initial_input_tokens = 0
 
             for chunk in stream_iterator:
-                text_chunk = chunk['choices'][0]['text']
-                token_usage_info = {'output_tokens': 1}
-                yield Resp(content_text=text_chunk, token_usage_info=token_usage_info)
+
+                delta_content = chunk['choices'][0]['delta'].get('content', '')
+                if not delta_content:
+                    continue
+
+                token_usage_info = {
+                    'input_tokens': chunk['usage']['prompt_tokens'] if 'usage' in chunk else initial_input_tokens,
+                    'output_tokens': chunk['usage']['completion_tokens'] if 'usage' in chunk else 1,
+                    'total_tokens': chunk['usage']['total_tokens'] if 'usage' in chunk else initial_input_tokens + 1
+                }
+
+                yield ChatMessageStreamDelta(
+                    content=delta_content,
+                    token_usage=SimpleNamespace(**token_usage_info)
+                )
 
         except Exception as e:
             print(f"Error during streaming LLM generation: {e}")
-            yield Resp(content_text=f"An error occurred during streaming generation: {e}", token_usage_info={'output_tokens': 0})
+            # yield Resp(content_text=f"An error occurred during streaming generation: {e}", token_usage_info={'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0})
+            yield ChatMessageStreamDelta(
+                content=f"An error occurred during streaming generation: {e}",
+                # role="assistant",
+                token_usage=SimpleNamespace(input_tokens=0, output_tokens=0, total_tokens=0)
+            )
 
 # --- Initialize the Llama.cpp Model ---
-model = LlamaCppModel("./tinyllama-1.1b-chat-v1.0.Q5_K_M.gguf", n_gpu_layers=1)
+model = LlamaCppModel("./qwen2.5-coder-7b-instruct-q4_k_m.gguf", n_gpu_layers=-1)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -193,10 +174,6 @@ class UploadNotesTool(Tool):
     output_type = "string"
 
     def forward(self, content: str) -> str:
-        """
-        Processes the input content, chunks it, embeds it, and stores it in ChromaDB.
-        Generates unique IDs for each chunk using UUIDs.
-        """
         if not content.strip():
             return "Error: No content provided for upload."
         chunks = [content[i:i+500] for i in range(0, len(content), 500)]
@@ -226,10 +203,6 @@ class SearchNotesTool(Tool):
     output_type = "string"
 
     def forward(self, query: str) -> str:
-        """
-        Searches the ChromaDB vector store for notes relevant to the query.
-        Retrieves the top 5 most similar documents.
-        """
         if not query.strip():
             return "Please provide a query to search your notes."
 
@@ -257,7 +230,7 @@ agent = CodeAgent(
     tools=[search_notes_tool],
     model=model,
     stream_outputs=True,
-    max_steps=3,
+    max_steps=2,
     verbosity_level=2,
 )
 
@@ -267,64 +240,85 @@ agent = CodeAgent(
 # ------------ Streamlit ---------------------------------------------------------------------
 
 def main():
-    st.set_page_config(layout="wide", page_title="Agentic RAG Notes Assistant")
+    # st.set_page_config(layout="wide", page_title="Agentic RAG Notes Assistant")
 
-    st.title("📄🧠 Agentic RAG Notes Assistant")
-    st.markdown("Upload your notes and then ask questions. The AI agent will use your notes to answer.")
+    # st.title("📄🧠 Agentic RAG Notes Assistant")
+    # st.markdown("Upload your notes and then ask questions. The AI agent will use your notes to answer.")
 
-    with st.sidebar:
-        st.header("Upload Your Notes")
-        st.info("Supported formats: PDF, Markdown, Plain Text. Notes are stored in an in-memory database for this demo. For persistence, uncomment the `persist_directory` in `chromadb.Client`.")
-        f = st.file_uploader("Upload Document", type=["pdf","md","txt"])
-        if f:
-            with st.spinner("Processing and uploading notes..."):
-                txt = ""
-                if f.type == "application/pdf":
-                    try:
-                        reader = PdfReader(f)
-                        txt = "\n".join(p.extract_text() or "" for p in reader.pages)
-                    except Exception as e:
-                        st.error(f"Error reading PDF: {e}")
-                        txt = ""
-                else:
-                    txt = f.read().decode("utf-8")
+    # with st.sidebar:
+    #     st.header("Upload Your Notes")
+    #     st.info("Supported formats: PDF, Markdown, Plain Text. Notes are stored in an in-memory database for this demo. For persistence, uncomment the `persist_directory` in `chromadb.Client`.")
+    #     f = st.file_uploader("Upload Document", type=["pdf","md","txt"])
+    #     if f:
+    #         with st.spinner("Processing and uploading notes..."):
+    #             txt = ""
+    #             if f.type == "application/pdf":
+    #                 try:
+    #                     reader = PdfReader(f)
+    #                     txt = "\n".join(p.extract_text() or "" for p in reader.pages)
+    #                 except Exception as e:
+    #                     st.error(f"Error reading PDF: {e}")
+    #                     txt = ""
+    #             else:
+    #                 txt = f.read().decode("utf-8")
 
-                if txt:
-                    upload_result = upload_notes_tool.forward(txt)
-                    st.success(upload_result)
-                else:
-                    st.warning("No text extracted from the uploaded file.")
+    #             if txt:
+    #                 upload_result = upload_notes_tool.forward(txt)
+    #                 st.success(upload_result)
+    #             else:
+    #                 st.warning("No text extracted from the uploaded file.")
 
-    # Main Chat Interface
-    st.header("Ask a Question")
-    query = st.text_input("Type your question here:", placeholder="e.g., What is Max's favorite activity? When is the Project Alpha meeting?")
+    # # Main Chat Interface
+    # st.header("Ask a Question")
+    # query = st.text_input("Type your question here:", placeholder="e.g., What is Max's favorite activity? When is the Project Alpha meeting?")
 
-    if query:
-        st.markdown("### Agent's Answer:")
-        answer_placeholder = st.empty()
-        full_response_content = ""
-        total_tokens_generated = 0
+    # if query:
+    #     st.markdown("### Agent's Answer:")
+    #     answer_placeholder = st.empty()
+    #     full_response_content = ""
+    #     total_tokens_generated = 0
         
 
-        with st.spinner("Agent is thinking..."):
-            try:
-                for resp_obj in agent.run(query):
-                    if hasattr(resp_obj, 'content'):
-                        full_response_content += resp_obj.content
-                        answer_placeholder.markdown(full_response_content + "▌")
+    #     with st.spinner("Agent is thinking..."):
+    #         try:
+    #             for resp_obj in agent.run(query):
+    #                 if hasattr(resp_obj, 'content'):
+    #                     full_response_content += resp_obj.content
+    #                     answer_placeholder.markdown(full_response_content + "▌")
                     
-                    if hasattr(resp_obj, 'token_usage') and isinstance(resp_obj.token_usage, dict):
-                        total_tokens_generated += resp_obj.token_usage.get('output_tokens', 0)
+    #                 if hasattr(resp_obj, 'token_usage') and isinstance(resp_obj.token_usage, SimpleNamespace):
+    #                     total_tokens_generated += resp_obj.token_usage.output_tokens
                 
-                answer_placeholder.markdown(full_response_content)
-                st.info(f"Total tokens generated: {total_tokens_generated} (approx.)")
+    #             answer_placeholder.markdown(full_response_content)
+    #             st.info(f"Total tokens generated: {total_tokens_generated} (approx.)")
 
-            except Exception as e:
-                st.error(f"An error occurred while the agent was processing: {e}")
-                st.warning("Please check the console for more details (verbosity_level=1 or 2 in CodeAgent).")
+    #         except Exception as e:
+    #             st.error(f"An error occurred while the agent was processing: {e}")
+    #             st.warning("Please check the console for more details (verbosity_level=1 or 2 in CodeAgent).")
 
-    st.sidebar.markdown(f"---")
-    st.sidebar.info(f"Notes in DB: {db.count()} chunks")
+    # st.sidebar.markdown(f"---")
+    # st.sidebar.info(f"Notes in DB: {db.count()} chunks")
+
+
+
+
+    query = "hi, how  are you? What can you do?"
+    res = ""
+
+    for resp_obj in agent.run(query):
+        # print("################# RESP OBJ #####################")
+        res += resp_obj
+        # print("################# TOKEN USAGE #####################")
+        # print(resp_obj.token_usage.output_tokens)
+
+
+    # print(agent.run(query))
+    print("################# RES #####################")
+    print(res)
+    
+
+
+
 
 if __name__ == "__main__":
     main()
