@@ -13,7 +13,8 @@ qwen2.5-coder-7b-instruct-q4_k_m.gguf
 ./qwen2.5-coder-7b-instruct-q4_k_m.gguf
 qwen2.5-coder-7b-instruct-q2_k.gguf
 ./qwen2.5-coder-7b-instruct-q2_k.gguf
-
+new_project_2.py
+./new_project_2.py
 
 /.venv
 *__pycache__/
