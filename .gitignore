@@ -15,8 +15,6 @@ qwen2.5-coder-7b-instruct-q2_k.gguf
 ./qwen2.5-coder-7b-instruct-q2_k.gguf
 new_project_2.py
 ./new_project_2.py
-sm_code_agent.txt
-sm_tool_calling.txt
 
 /.venv
 *__pycache__/
